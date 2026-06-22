@@ -3,9 +3,11 @@ const CONFIG = {
   LOCATION_FALLBACK: "SANT'ANGELO A CUPOLO",
 };
 
-const STATUS_URL = `${CONFIG.API_BASE}/api/status`;
-const LATEST_URL = `${CONFIG.API_BASE}/latest`;
-const HISTORY_URL = `${CONFIG.API_BASE}/history?limit=10`;
+const SUPABASE_URL =
+"https://tgmvzgvuhfmvpdreunim.supabase.co/rest/v1/weather";
+
+const SUPABASE_KEY =
+"sb_publishable_oINVjfPFwYsVLZcHutdjIQ_gFAqFTcp";
 
 const state = {
   online: false,
@@ -448,42 +450,76 @@ function applyCsvLine(line) {
 }
 
 async function refreshStatus() {
+
   try {
-    const res = await fetch(STATUS_URL, { cache: "no-store" });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const payload = await res.json();
-    applyStatus(payload);
+
+    const res = await fetch(
+      `${SUPABASE_URL}?select=*&order=id.desc&limit=1`,
+      {
+        headers: {
+          apikey: SUPABASE_KEY,
+          Authorization: `Bearer ${SUPABASE_KEY}`
+        }
+      }
+    );
+
+    const data = await res.json();
+
+    if (!data.length) return;
+
+    const row = data[0];
+
+    applyStatus({
+      online: true,
+      location: CONFIG.LOCATION_FALLBACK,
+      timestamp: row.timestamp,
+      temp: row.temp,
+      hum: row.hum,
+      press: row.press,
+      gas: row.gas
+    });
+
     renderState();
     renderForecast();
-  } catch (jsonError) {
-    try {
-      const res = await fetch(LATEST_URL, { cache: "no-store" });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const text = await res.text();
-      if (applyCsvLine(text)) {
-        renderState();
-        renderForecast();
-      }
-    } catch (csvError) {
-      console.warn("Station fetch failed:", jsonError, csvError);
-    }
+
+  } catch (err) {
+
+    console.error("Supabase:", err);
+
   }
+
 }
 
 async function refreshHistory() {
+
   try {
-    const res = await fetch(HISTORY_URL, { cache: "no-store" });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const text = await res.text();
-    state.logs = parseHistoryText(text);
+
+    const res = await fetch(
+      `${SUPABASE_URL}?select=*&order=id.desc&limit=10`,
+      {
+        headers: {
+          apikey: SUPABASE_KEY,
+          Authorization: `Bearer ${SUPABASE_KEY}`
+        }
+      }
+    );
+
+    const rows = await res.json();
+
+    state.logs = rows.map(row => ({
+      icon: "icon_status.png",
+      title: `${row.temp.toFixed(1)}°C`,
+      meta: `${row.timestamp} | H:${row.hum}% P:${row.press} G:${row.gas}`
+    }));
+
     renderLogs();
-  } catch (error) {
-    if (!state.logs.length) {
-      state.logs = fallbackLogs();
-      renderLogs();
-    }
-    console.warn("History fetch failed:", error);
+
+  } catch (err) {
+
+    console.error("History:", err);
+
   }
+
 }
 
 window.setWeatherBoy = function setWeatherBoy(nextData) {

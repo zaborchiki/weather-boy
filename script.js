@@ -1,6 +1,5 @@
-
 const CONFIG = {
-  API_BASE: "http://192.168.1.36:3001",
+  API_BASE: "http://192.168.1.36:3001/api",
   LOCATION_FALLBACK: "SANT'ANGELO A CUPOLO",
   // Coordinates of Sant'Angelo a Cupolo, Benevento, Campania, Italy.
   LAT: 41.0691,
@@ -672,6 +671,21 @@ function applyStatus(payload) {
   state.humidity = hum;
   state.pressure = press;
   state.gas = gas;
+  state.pm1 = payload.pm1 ?? state.pm1;
+
+state.pm25 = payload.pm25 ?? state.pm25;
+
+state.pm10 = payload.pm10 ?? state.pm10;
+
+state.uv = payload.uv ?? state.uv;
+
+state.lux = payload.lux ?? state.lux;
+
+state.lightningDistance =
+    payload.lightningDistance ?? state.lightningDistance;
+
+state.lightningEnergy =
+    payload.lightningEnergy ?? state.lightningEnergy;
   state.wind = windValue;
   state.rainChance = rainChance;
   state.rainText = payload.rainText || rainLabelFrom(rainChance);
@@ -741,95 +755,97 @@ function applyCsvLine(line) {
 // ---------------------------------------------------------------------
  
 async function refreshStatus() {
- 
+
   try {
- 
-    const res = await fetch(
-      `${SUPABASE_URL}?select=*&order=id.desc&limit=1`,
-      {
-        headers: {
-          apikey: SUPABASE_KEY,
-          Authorization: `Bearer ${SUPABASE_KEY}`
-        }
-      }
-    );
- 
-    if (!res.ok) throw new Error(`Supabase HTTP ${res.status}`);
- 
-    const data = await res.json();
- 
-    if (!data.length) return;
- 
-    const row = data[0];
- 
-    applyStatus({
-      online: true,
-      location: CONFIG.LOCATION_FALLBACK,
-      timestamp: row.timestamp,
-      temp: row.temp,
-      hum: row.hum,
-      press: row.press,
-      gas: row.gas
+
+    const res = await fetch(`${CONFIG.API_BASE}/status`, {
+      cache: "no-store"
     });
- 
+
+    if (!res.ok) {
+      throw new Error(`Backend HTTP ${res.status}`);
+    }
+
+    const row = await res.json();
+
+    applyStatus({
+
+      online: true,
+
+      location: CONFIG.LOCATION_FALLBACK,
+
+      timestamp: row.updated || row.timestamp,
+
+      temp: row.temperature,
+
+      hum: row.humidity,
+
+      press: row.pressure,
+
+      gas: row.gas,
+
+      wind: row.wind,
+
+      rainChance: row.rainChance,
+
+      uv: row.uv,
+
+      lux: row.lux,
+
+      pm1: row.pm1,
+
+      pm25: row.pm25,
+
+      pm10: row.pm10,
+
+      lightningDistance: row.lightningDistance,
+
+      lightningEnergy: row.lightningEnergy
+
+    });
+
     renderState();
+
     renderForecast();
+
     saveCache();
- 
+
   } catch (err) {
- 
-    // Station unreachable: keep showing the last known data, just note it.
-    console.warn("Supabase (station) unavailable, keeping last known data:", err);
+
+    console.warn("Backend unavailable:", err);
+
+    state.online = false;
+
     renderLastUpdate();
- 
+
   }
- 
+
 }
  
 async function refreshHistory() {
- 
-  try {
- 
-    const res = await fetch(
-      `${SUPABASE_URL}?select=*&order=id.desc&limit=20`,
-      {
-        headers: {
-          apikey: SUPABASE_KEY,
-          Authorization: `Bearer ${SUPABASE_KEY}`
+
+    try {
+
+        const res = await fetch(`${CONFIG.API_BASE}/history`, {
+            cache: "no-store"
+        });
+
+        if (!res.ok) {
+            throw new Error(`HTTP ${res.status}`);
         }
-      }
-    );
- 
-    if (!res.ok) throw new Error(`Supabase HTTP ${res.status}`);
- 
-    const rows = await res.json();
- 
-    // Supabase returns newest-first; keep that order for the log list,
-    // but charts read oldest -> newest so the line runs left to right in time.
-    state.history = rows.slice().reverse().map((row) => ({
-      timestamp: row.timestamp,
-      temp: safeNumber(row.temp, null),
-      hum: safeNumber(row.hum, null),
-      press: safeNumber(row.press, null),
-      gas: safeNumber(row.gas, null),
-    }));
- 
-    state.logs = rows.slice(0, 10).map(row => ({
-      icon: "icon_status.png",
-      title: `${Number(row.temp).toFixed(1)}°C`,
-      meta: `${row.timestamp} | H:${row.hum}% P:${row.press} G:${row.gas}`
-    }));
- 
-    renderLogs();
-    renderCharts();
-    saveCache();
- 
-  } catch (err) {
- 
-    console.warn("Supabase (history) unavailable, keeping last known charts/logs:", err);
- 
-  }
- 
+
+        const history = await res.json();
+
+        state.history = history;
+
+        renderChart();
+
+    } catch (err) {
+
+        console.error("History error:", err);
+
+    }
+
 }
  
 async function refreshOpenMeteo() {

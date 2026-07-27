@@ -70,7 +70,13 @@ body::after{
 
 .device{
   position: relative;
-  width: min(98vw, 144vh);
+  /* aspect-ratio is 4/3, so height = width * 0.75.
+     To guarantee the device fits inside the viewport height too,
+     width must never exceed (available height / 0.75).
+     96vh / 0.75 = 128vh - previously this was 144vh, which made the
+     device taller than the screen on 1366x768, ultrawide (3440x1440)
+     and other height-constrained resolutions, clipping the frame. */
+  width: min(96vw, 128vh);
   aspect-ratio: 4 / 3;
   filter: drop-shadow(0 0 24px rgba(110, 252, 123, 0.16));
 }
@@ -166,6 +172,14 @@ body::after{
   justify-content: flex-end;
 }
 
+.chip.is-stale{
+  color: #ffcf5c;
+}
+ 
+.chip.is-stale img{
+  filter: sepia(1) saturate(4) hue-rotate(-20deg);
+}
+ 
 .sky-badge{
   display: inline-flex;
   align-items: center;
@@ -270,6 +284,42 @@ body::after{
   color: rgba(220, 255, 217, 0.80);
   font-size: clamp(10px, 0.75vw, 14px);
   opacity: 0.92;
+}
+
+.mini-chart-wrap{
+  width: 100%;
+  height: clamp(16px, 1.8vw, 30px);
+  margin-top: 2px;
+}
+
+.mini-chart-wrap svg{
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.mini-chart-wrap .chart-note{
+  display: block;
+  color: rgba(220, 255, 217, 0.45);
+  font-size: clamp(9px, 0.62vw, 11px);
+  letter-spacing: 0.03em;
+  line-height: clamp(16px, 1.8vw, 30px);
+}
+
+.mini-chart-line{
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  filter: drop-shadow(0 0 3px rgba(196, 255, 100, 0.35));
+}
+
+.mini-chart-area{
+  fill: url(#miniChartFade);
+  opacity: 0.55;
+  stroke: none;
 }
 
 .hero{

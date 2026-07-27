@@ -1,5 +1,5 @@
 const CONFIG = {
-  API_BASE: "http://192.168.1.36:3001/api",
+  API_BASE: "http://100.126.25.87:3001/api",
   LOCATION_FALLBACK: "SANT'ANGELO A CUPOLO",
   // Coordinates of Sant'Angelo a Cupolo, Benevento, Campania, Italy.
   LAT: 41.0691,

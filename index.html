@@ -11,17 +11,17 @@
     <div id="bootScreen">
   <img src="images/vaultboy_perfect.png" id="bootBoy">
   <div class="bootText">WEATHER-BOY MK1</div>
-
+ 
   <div class="bootBar">
     <div id="bootProgress"></div>
   </div>
-
+ 
   <div id="bootPercent">0%</div>
 </div>
   <main class="app">
     <section class="device" aria-label="Pip-Boy weather interface">
       <img class="frame" src="images/frame.png" alt="" aria-hidden="true" />
-
+ 
       <div class="screen">
         <header class="topbar">
           <div class="top-left">
@@ -33,15 +33,19 @@
               <img src="images/icon_time.png" alt="" aria-hidden="true" />
               <span id="timeText">20:45</span>
             </span>
+            <span class="chip" id="lastUpdateChip">
+              <img src="images/icon_status.png" alt="" aria-hidden="true" />
+              <span id="lastUpdateText">--:--</span>
+            </span>
           </div>
-
+ 
           <div class="top-center" id="locationText">SANT'ANGELO A CUPOLO</div>
-
+ 
           <div class="top-right">
             <span class="sky-badge" id="skyText">СОЛНЕЧНО</span>
           </div>
         </header>
-
+ 
         <section class="panes">
           <section class="pane active" data-pane="status">
             <div class="dashboard">
@@ -53,8 +57,9 @@
                   </div>
                   <div class="metric-value" id="tempText">29.1°C</div>
                   <div class="metric-sub" id="tempMood">Тепло</div>
+                  <div class="mini-chart-wrap" id="tempChartWrap"></div>
                 </article>
-
+ 
                 <article class="metric-card">
                   <div class="metric-head">
                     <img src="images/icon_humidity.png" alt="" class="metric-icon" aria-hidden="true" />
@@ -62,8 +67,9 @@
                   </div>
                   <div class="metric-value" id="humidityText">61%</div>
                   <div class="metric-sub" id="humidityMood">Комфортно</div>
+                  <div class="mini-chart-wrap" id="humidityChartWrap"></div>
                 </article>
-
+ 
                 <article class="metric-card">
                   <div class="metric-head">
                     <img src="images/icon_pressure.png" alt="" class="metric-icon" aria-hidden="true" />
@@ -73,13 +79,13 @@
                   <div class="metric-sub" id="pressureMood">Низкое</div>
                 </article>
               </aside>
-
+ 
               <section class="hero">
                 <div class="hero-ring"></div>
                 <img id="vaultboySprite" src="images/vaultboy_perfect.png" alt="Vault Boy weather sprite" />
                 <div class="hero-badge" id="statusBadge">СТАБИЛЬНО</div>
               </section>
-
+ 
               <aside class="stack">
                 <article class="metric-card">
                   <div class="metric-head">
@@ -88,8 +94,9 @@
                   </div>
                   <div class="metric-value" id="airText">ХОРОШЕЕ</div>
                   <div class="metric-sub" id="airMood">Нормально</div>
+                  <div class="mini-chart-wrap" id="airChartWrap"></div>
                 </article>
-
+ 
                 <article class="metric-card">
                   <div class="metric-head">
                     <img src="images/icon_rain.png" alt="" class="metric-icon" aria-hidden="true" />
@@ -97,8 +104,9 @@
                   </div>
                   <div class="metric-value" id="rainText">15%</div>
                   <div class="metric-sub" id="rainMood">Маловероятен</div>
+                  <div class="mini-chart-wrap" id="rainChartWrap"></div>
                 </article>
-
+ 
                 <article class="metric-card">
                   <div class="metric-head">
                     <img src="images/icon_wind.png" alt="" class="metric-icon" aria-hidden="true" />
@@ -110,14 +118,14 @@
               </aside>
             </div>
           </section>
-
+ 
           <section class="pane" data-pane="weather">
             <div class="page-shell">
               <div class="page-title">
                 <span class="page-kicker">WEATHER</span>
                 <span class="page-note">Прогноз и тенденция</span>
               </div>
-
+ 
               <div class="forecast-grid" id="forecastGrid">
                 <article class="forecast-card">
                   <img src="images/icon_time.png" alt="" class="forecast-icon" aria-hidden="true" />
@@ -150,7 +158,7 @@
                   <div class="forecast-label">5%</div>
                 </article>
               </div>
-
+ 
               <div class="trend-panel">
                 <div class="trend-head">
                   <div>
@@ -159,8 +167,8 @@
                   </div>
                   <img src="images/icon_pressure.png" alt="" class="trend-icon" aria-hidden="true" />
                 </div>
-
-                <div class="trend-chart" aria-hidden="true">
+ 
+                <div class="trend-chart" id="trendChart" aria-hidden="true">
                   <span style="--h: 68%"></span>
                   <span style="--h: 64%"></span>
                   <span style="--h: 60%"></span>
@@ -170,7 +178,7 @@
                   <span style="--h: 49%"></span>
                   <span style="--h: 51%"></span>
                 </div>
-
+ 
                 <div class="trend-footer">
                   <div class="trend-chip">☔ Возможен дождь</div>
                   <div class="trend-chip">😷 Воздух: хороший</div>
@@ -179,14 +187,14 @@
               </div>
             </div>
           </section>
-
+ 
           <section class="pane" data-pane="logs">
             <div class="page-shell">
               <div class="page-title">
                 <span class="page-kicker">LOGS</span>
                 <span class="page-note">Последние события</span>
               </div>
-
+ 
               <div class="logs-list" id="logsList">
                 <article class="log-item">
                   <img src="images/icon_status.png" alt="" class="log-icon" aria-hidden="true" />
@@ -195,7 +203,7 @@
                     <div class="log-meta">20:10 — связь стабильна</div>
                   </div>
                 </article>
-
+ 
                 <article class="log-item">
                   <img src="images/icon_temp.png" alt="" class="log-icon" aria-hidden="true" />
                   <div class="log-body">
@@ -203,7 +211,7 @@
                     <div class="log-meta">20:10 — 29.1°C</div>
                   </div>
                 </article>
-
+ 
                 <article class="log-item">
                   <img src="images/icon_pressure.png" alt="" class="log-icon" aria-hidden="true" />
                   <div class="log-body">
@@ -211,7 +219,7 @@
                     <div class="log-meta">20:10 — 991.8 hPa</div>
                   </div>
                 </article>
-
+ 
                 <article class="log-item">
                   <img src="images/icon_air.png" alt="" class="log-icon" aria-hidden="true" />
                   <div class="log-body">
@@ -223,7 +231,7 @@
             </div>
           </section>
         </section>
-
+ 
         <nav class="tabs">
           <button class="tab-btn active" data-tab="status">STATUS</button>
           <button class="tab-btn" data-tab="weather">WEATHER</button>
@@ -232,7 +240,7 @@
       </div>
     </section>
   </main>
-
+ 
   <script src="script.js"></script>
 </body>
 </html>

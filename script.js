@@ -1,38 +1,54 @@
+/* =====================================================================
+   WEATHER-BOY MK1 — логика сайта
+   Данные берутся с домашнего сервера (InfluxDB через backend /api)
+   и дополняются прогнозом Open-Meteo.
+   ===================================================================== */
+ 
 const CONFIG = {
-  API_BASE: "http://100.126.25.87:3001/api",
-  LOCATION_FALLBACK: "SANT'ANGELO A CUPOLO",
-  // Coordinates of Sant'Angelo a Cupolo, Benevento, Campania, Italy.
-  LAT: 41.0691,
-  LON: 14.8037,
+  // Сайт раздаётся тем же сервером, что и API, поэтому адрес относительный.
+  // Если открыть файл напрямую (file://), подставится резервный адрес.
+  API_BASE: location.protocol.startsWith("http")
+    ? location.origin + "/api"
+    : "http://192.168.1.40:3001/api",
+ 
+  LOCATION: "SANT'ANGELO DI OGLIARA",
+ 
+  // Sant'Angelo di Ogliara, Salerno. Высота станции 257 м.
+  LAT: 40.70,
+  LON: 14.74,
+  ALTITUDE_M: 257,
   TIMEZONE: "Europe/Rome",
 };
  
-const SUPABASE_URL =
-"https://tgmvzgvuhfmvpdreunim.supabase.co/rest/v1/weather";
- 
-const SUPABASE_KEY =
-"sb_publishable_oINVjfPFwYsVLZcHutdjIQ_gFAqFTcp";
- 
-// How often each data source is allowed to be refreshed (ms).
 const INTERVALS = {
   clock: 1000,
-  station: 15000,      // local station via Supabase: every 10-15s
-  history: 30000,      // history/log rows for charts + logs
-  openMeteo: 10 * 60 * 1000,   // Open-Meteo: no more than once per 10 min
-  lastUpdateTick: 15000,       // just re-renders the "updated X ago" label
+  station: 15000,
+  history: 60000,
+  openMeteo: 10 * 60 * 1000,
+  lastUpdateTick: 15000,
 };
  
-const CACHE_KEY = "weatherboy_cache_v1";
+const CACHE_KEY = "weatherboy_cache_v2";
  
 const state = {
   online: false,
-  location: CONFIG.LOCATION_FALLBACK,
+  location: CONFIG.LOCATION,
   timestamp: "--",
   temp: 0,
   humidity: 0,
-  pressure: 0,
-  gas: 0,
-  wind: null,
+  pressure: 0,      // приведённое к уровню моря — его показываем
+  pressureRaw: 0,   // на высоте станции
+  gasKOhm: 0,
+  pm1: null, pm25: null, pm10: null,
+  uv: null, lux: null,
+  lightningDistance: null,
+  lightningAgeS: null,
+  lightningCount: 0,
+  rssi: null, freeHeap: null, uptimeS: null,
+ 
+  wind: null,          // ветра на станции нет — поле остаётся пустым
+  windForecast: null,  // ветер из прогноза, показываем отдельно и честно
+ 
   rainChance: 0,
   rainText: "дождя не ожидается",
   sprite: "perfect",
@@ -44,18 +60,18 @@ const state = {
   airLabel: "-",
   airMood: "-",
   rainMood: "-",
-  windMood: "Нет данных",
+  windMood: "Датчика нет",
   forecast: [],
   logs: [],
  
-  // --- extended runtime state ---
-  history: [],            // chronological (oldest -> newest) raw station rows, for charts
-  lastUpdatedAt: null,     // ms epoch of the last successful station read
-  weatherCode: null,       // last Open-Meteo weathercode (current conditions)
-  sunrise: null,           // Date | null
-  sunset: null,            // Date | null
-  lastOpenMeteoAt: null,   // ms epoch of last successful Open-Meteo read
-  sunDate: null,           // "YYYY-MM-DD" the cached sunrise/sunset belongs to
+  history: [],
+  pressureTrend3h: null,
+  lastUpdatedAt: null,
+  weatherCode: null,
+  sunrise: null,
+  sunset: null,
+  lastOpenMeteoAt: null,
+  sunDate: null,
 };
  
 const $ = (id) => document.getElementById(id);
@@ -104,19 +120,91 @@ const spriteMap = {
   airmask: "images/vaultboy_airmask.png",
 };
  
+/* =====================================================================
+   ЗВУК
+   Было две ошибки:
+   1) разблокировка висела на document и срабатывала ПОСЛЕ обработчика
+      кнопки, поэтому первый клик по вкладке всегда был беззвучным;
+   2) звук загрузки требовал разблокировки, а кликнуть за 1.3 секунды
+      загрузки невозможно — он не играл никогда.
+   Теперь: разблокировка на pointerdown (срабатывает раньше click),
+   а звук загрузки ставится в очередь и играет при первом касании.
+   ===================================================================== */
+const Snd = {
+  boot: null,
+  tab: null,
+  unlocked: false,
+  pending: null,
+  broken: false,
+ 
+  setup() {
+    try {
+      this.boot = new Audio("sounds/pipboy_boot.mp3");
+      this.tab = new Audio("sounds/pipboy_tab.mp3");
+      this.boot.volume = 0.5;
+      this.tab.volume = 0.4;
+      this.boot.preload = "auto";
+      this.tab.preload = "auto";
+      // Если файлов нет — просто выключаем звук, сайт от этого не ломается.
+      this.boot.addEventListener("error", () => { this.broken = true; });
+      this.tab.addEventListener("error", () => { this.broken = true; });
+    } catch (e) {
+      this.broken = true;
+    }
+ 
+    const unlock = () => {
+      if (this.unlocked || this.broken) return;
+      this.unlocked = true;
+      // Браузер разрешает звук только внутри жеста пользователя.
+      // «Прогреваем» оба файла: запускаем и сразу останавливаем.
+      [this.boot, this.tab].forEach((a) => {
+        if (!a) return;
+        const p = a.play();
+        if (p && p.then) p.then(() => { a.pause(); a.currentTime = 0; }).catch(() => {});
+      });
+      if (this.pending) {
+        const name = this.pending;
+        this.pending = null;
+        setTimeout(() => this.play(name), 60);
+      }
+    };
+ 
+    // pointerdown идёт раньше click, поэтому первый клик по вкладке уже со звуком
+    document.addEventListener("pointerdown", unlock, { once: true });
+    document.addEventListener("touchstart", unlock, { once: true });
+    document.addEventListener("keydown", unlock, { once: true });
+  },
+ 
+  play(name) {
+    if (this.broken) return;
+    const a = this[name];
+    if (!a) return;
+    if (!this.unlocked) {
+      if (name === "boot") this.pending = "boot";
+      return;
+    }
+    try {
+      a.currentTime = 0;
+      const p = a.play();
+      if (p && p.catch) p.catch(() => {});
+    } catch (e) {}
+  },
+};
+ 
+/* =====================================================================
+   ПОМОЩНИКИ
+   ===================================================================== */
 function safeNumber(value, fallback = 0) {
   const n = Number(value);
   return Number.isFinite(n) ? n : fallback;
 }
+const has = (v) => v !== null && v !== undefined && Number.isFinite(Number(v));
  
-// Falls back to a fixed hour window only until real sunrise/sunset data
-// has arrived from Open-Meteo; after that, uses the real values.
 function isNightTime() {
   if (state.sunrise instanceof Date && state.sunset instanceof Date) {
     const now = new Date();
     return now < state.sunrise || now > state.sunset;
   }
- 
   const hour = new Date().getHours();
   return hour >= 21 || hour < 6;
 }
@@ -124,19 +212,11 @@ function isNightTime() {
 function timeNowRome() {
   const now = new Date();
   const time = new Intl.DateTimeFormat("it-IT", {
-    timeZone: "Europe/Rome",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
+    timeZone: CONFIG.TIMEZONE, hour: "2-digit", minute: "2-digit", hour12: false,
   }).format(now);
- 
   const date = new Intl.DateTimeFormat("ru-RU", {
-    timeZone: "Europe/Rome",
-    day: "2-digit",
-    month: "2-digit",
-    year: "numeric",
+    timeZone: CONFIG.TIMEZONE, day: "2-digit", month: "2-digit", year: "numeric",
   }).format(now);
- 
   return { time, date };
 }
  
@@ -146,11 +226,11 @@ function updateClock() {
   ui.dateText.textContent = date;
 }
  
-function tempMoodFrom(temp) {
-  if (temp >= 35) return "Жарко";
-  if (temp >= 25) return "Тепло";
-  if (temp <= 8) return "Холодно";
-  if (temp <= 18) return "Прохладно";
+function tempMoodFrom(t) {
+  if (t >= 35) return "Жарко";
+  if (t >= 25) return "Тепло";
+  if (t <= 8) return "Холодно";
+  if (t <= 18) return "Прохладно";
   return "Комфортно";
 }
  
@@ -160,24 +240,38 @@ function humidityMoodFrom(h) {
   return "Суховато";
 }
  
+// Давление приведено к уровню моря, поэтому пороги стандартные.
 function pressureMoodFrom(p) {
-  if (p < 995) return "Низкое";
-  if (p < 1002) return "Нормальное";
+  if (p < 1005) return "Низкое";
+  if (p < 1020) return "Нормальное";
   return "Высокое";
 }
  
-function airLabelFromGas(gas) {
-  if (gas < 18) return "ПЛОХОЕ";
-  if (gas < 30) return "СРЕДНЕЕ";
-  if (gas < 60) return "ХОРОШЕЕ";
-  return "ОТЛИЧНОЕ";
+// Точка росы — честный показатель того, как влажность ощущается телом.
+function dewPoint(t, rh) {
+  if (!has(t) || !has(rh) || rh <= 0) return null;
+  const a = 17.27, b = 237.7;
+  const g = (a * t) / (b + t) + Math.log(rh / 100);
+  return Math.round(((b * g) / (a - g)) * 10) / 10;
 }
  
-function airMoodFromGas(gas) {
-  if (gas < 18) return "Плохое";
-  if (gas < 30) return "Среднее";
-  if (gas < 60) return "Хорошее";
-  return "Отличное";
+/* Качество воздуха теперь считается по PM2.5 — это и есть датчик пыли.
+   Раньше здесь был газовый датчик, но пороги были написаны для килоом,
+   а значение приходило в омах, поэтому всегда выходило «ОТЛИЧНОЕ». */
+function airLabelFromPm(pm25) {
+  if (!has(pm25)) return "НЕТ ДАННЫХ";
+  if (pm25 <= 12) return "ХОРОШЕЕ";
+  if (pm25 <= 35) return "СРЕДНЕЕ";
+  if (pm25 <= 55) return "ПЛОХОЕ";
+  return "ОПАСНОЕ";
+}
+ 
+function airMoodFromPm(pm25) {
+  if (!has(pm25)) return "Датчик молчит";
+  if (pm25 <= 12) return "Чисто";
+  if (pm25 <= 35) return "Приемлемо";
+  if (pm25 <= 55) return "Вредно для чувствительных";
+  return "Лучше не выходить";
 }
  
 function rainLabelFrom(chance) {
@@ -185,103 +279,50 @@ function rainLabelFrom(chance) {
   if (chance <= 20) return "маловероятен";
   if (chance <= 45) return "возможен";
   if (chance <= 70) return "вероятен";
-  return "высокая вероятность дождя";
+  return "высокая вероятность";
 }
  
-function windMoodFromSpeed(speedMs) {
-  if (speedMs == null || !Number.isFinite(speedMs)) return "Нет данных";
-  if (speedMs < 1.6) return "Штиль";
-  if (speedMs < 3.4) return "Лёгкий";
-  if (speedMs < 7.9) return "Умеренный";
-  if (speedMs < 13.9) return "Сильный";
-  return "Штормовой";
-}
- 
-// Groups Open-Meteo WMO weather codes into broad buckets so real observed
-// sky conditions can corroborate the sensor-based sprite heuristic.
 function weatherCodeBucket(code) {
   if (code == null) return null;
   const c = Number(code);
   if (!Number.isFinite(c)) return null;
-  if (c === 0) return "clear";
-  if (c === 1 || c === 2) return "clear";
-  if (c === 3) return "cloudy";
-  if ([45, 48].includes(c)) return "cloudy";
-  if ([51, 53, 55, 56, 57, 61, 63, 66, 80, 81].includes(c)) return "rain";
-  if ([65, 67, 82].includes(c)) return "rain";
-  if ([71, 73, 75, 77, 85, 86].includes(c)) return "rain";
-  if ([95, 96, 99].includes(c)) return "storm";
+  if (c === 0 || c === 1 || c === 2) return "clear";
+  if (c === 3 || c === 45 || c === 48) return "cloudy";
+  if ([51,53,55,56,57,61,63,65,66,67,80,81,82].includes(c)) return "rain";
+  if ([71,73,75,77,85,86].includes(c)) return "rain";
+  if ([95,96,99].includes(c)) return "storm";
   return null;
 }
  
-function spriteFromValues(temp, hum, press, gas, rainChance, codeBucket = null) {
- 
-  if (gas < 18) return "airmask";
- 
+function spriteFromValues(temp, hum, press, pm25, rainChance, codeBucket, lightningFresh) {
+  if (lightningFresh) return "storm";
+  if (has(pm25) && pm25 > 55) return "airmask";
   if (temp >= 35) return "heat";
- 
   if (temp <= 8) return "cold";
- 
   if (codeBucket === "storm" || rainChance >= 70) return "storm";
- 
   if (codeBucket === "rain" || rainChance >= 55) return "rain";
- 
-  if (hum >= 80 && press < 992)
-    return "cloudy";
- 
-  if (hum >= 70)
-    return "cloudy";
- 
-  if (hum <= 25 && temp >= 28)
-    return "dry";
- 
-  if (codeBucket === "cloudy" && temp < 25)
-    return "cloudy";
- 
-  if (temp >= 25)
-    return "sun";
- 
-  if (codeBucket === "clear")
-    return "sun";
- 
+  if (hum >= 80 && press < 1005) return "cloudy";
+  if (hum >= 70) return "cloudy";
+  if (hum <= 25 && temp >= 28) return "dry";
+  if (codeBucket === "cloudy" && temp < 25) return "cloudy";
+  if (temp >= 25) return "sun";
+  if (codeBucket === "clear") return "sun";
   return "perfect";
 }
  
 function skyLabelFromSprite(sprite) {
- 
   const night = isNightTime();
- 
   switch (sprite) {
- 
-    case "sun":
-      return night ? "ЯСНАЯ НОЧЬ" : "СОЛНЕЧНО";
- 
-    case "cloudy":
-      return "ОБЛАЧНО";
- 
-    case "rain":
-      return "ДОЖДЬ";
- 
-    case "storm":
-      return "ШТОРМ";
- 
-    case "heat":
-      return "ЖАРА";
- 
-    case "cold":
-      return "ХОЛОД";
- 
-    case "dry":
-      return "СУХО";
- 
-    case "wind":
-      return "ВЕТЕР";
- 
-    case "airmask":
-      return "ПЛОХОЙ ВОЗДУХ";
- 
-    default:
-      return night ? "ЯСНАЯ НОЧЬ" : "СТАБИЛЬНО";
+    case "sun": return night ? "ЯСНАЯ НОЧЬ" : "СОЛНЕЧНО";
+    case "cloudy": return "ОБЛАЧНО";
+    case "rain": return "ДОЖДЬ";
+    case "storm": return "ГРОЗА";
+    case "heat": return "ЖАРА";
+    case "cold": return "ХОЛОД";
+    case "dry": return "СУХО";
+    case "wind": return "ВЕТЕР";
+    case "airmask": return "ПЛОХОЙ ВОЗДУХ";
+    default: return night ? "ЯСНАЯ НОЧЬ" : "СТАБИЛЬНО";
   }
 }
  
@@ -291,95 +332,64 @@ function statusLabelFromSprite(sprite) {
     case "heat": return "ЖАРА";
     case "cold": return "ХОЛОД";
     case "dry": return "СУХО";
-    case "storm": return "ШТОРМ";
+    case "storm": return "ГРОЗА";
     case "rain": return "ДОЖДЬ";
     default: return "СТАБИЛЬНО";
   }
 }
  
-function rainChanceFrom(hum, press) {
- 
+/* Оценка дождя по своим датчикам — запасной вариант, если прогноз
+   недоступен. Работает по классическому правилу барометра:
+   низкое и падающее давление плюс высокая влажность = к осадкам. */
+function rainChanceFrom(hum, press, trend3h) {
   let score = 0;
+  if (hum >= 90) score += 35;
+  else if (hum >= 85) score += 25;
+  else if (hum >= 80) score += 15;
+  else if (hum >= 70) score += 5;
  
-  if (hum >= 90)
-    score += 35;
-  else if (hum >= 85)
-    score += 25;
-  else if (hum >= 80)
-    score += 15;
+  if (press <= 1000) score += 30;
+  else if (press <= 1008) score += 18;
+  else if (press <= 1013) score += 8;
  
-  if (press <= 985)
-    score += 40;
-  else if (press <= 988)
-    score += 25;
-  else if (press <= 991)
-    score += 10;
- 
-  if (score > 100)
-    score = 100;
- 
-  if (score < 0)
-    score = 0;
- 
-  return score;
+  if (has(trend3h)) {
+    if (trend3h <= -2) score += 25;
+    else if (trend3h <= -1) score += 12;
+    else if (trend3h >= 2) score -= 15;
+  }
+  return Math.max(0, Math.min(100, Math.round(score)));
 }
  
-// Honest placeholder used only until real forecast data (station-provided
-// or Open-Meteo) is available. No invented temperatures/percentages.
-function placeholderForecast() {
-  const slots = ["21:00", "00:00", "03:00", "06:00", "09:00"];
-  return slots.map((time) => ({ time, temp: null, rain: null }));
+function trendWord(d) {
+  if (!has(d)) return "Нет данных";
+  if (d <= -2) return "Быстро падает";
+  if (d <= -1) return "Падает";
+  if (d >= 2) return "Быстро растёт";
+  if (d >= 1) return "Растёт";
+  return "Стабильно";
 }
  
-function fallbackLogs() {
-  return [
-    { icon: "icon_status.png", title: "Нет истории", meta: "Данные ещё не накопились" },
-    { icon: "icon_temp.png", title: "Станция онлайн", meta: "Ожидаются новые записи" },
-  ];
+function formatRelativeUpdate(ms) {
+  if (!ms) return "нет данных";
+  const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
+  if (s < 20) return "только что";
+  if (s < 60) return `${s} сек назад`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m} мин назад`;
+  return `${Math.round(m / 60)} ч назад`;
 }
  
-function iconFromKind(kind) {
-  const k = String(kind || "").toLowerCase();
-  if (k.includes("temp")) return "icon_temp.png";
-  if (k.includes("humid")) return "icon_humidity.png";
-  if (k.includes("press")) return "icon_pressure.png";
-  if (k.includes("air")) return "icon_air.png";
-  if (k.includes("rain")) return "icon_rain.png";
-  if (k.includes("wind")) return "icon_wind.png";
-  if (k.includes("boot") || k.includes("status")) return "icon_status.png";
-  return "icon_status.png";
+function durWords(s) {
+  if (!has(s)) return "—";
+  const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60);
+  if (d) return `${d} д ${h} ч`;
+  if (h) return `${h} ч ${m} мин`;
+  return `${m} мин`;
 }
  
-function parseHistoryText(text) {
-  if (!text || !text.trim()) return [];
- 
-  return text
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .slice(-10)
-    .map((line) => {
-      const parts = line.split("|").map((s) => s.trim());
-      if (parts.length >= 3) {
-        return {
-          icon: iconFromKind(parts[1]),
-          title: parts[1],
-          meta: `${parts[0]} — ${parts.slice(2).join(" |")}`,
-        };
-      }
- 
-      return {
-        icon: "icon_status.png",
-        title: "Запись",
-        meta: line,
-      };
-    });
-}
- 
-// ---------------------------------------------------------------------
-// Real-data sparkline charts (temp / humidity / pressure / rain / air)
-// ---------------------------------------------------------------------
- 
+/* =====================================================================
+   ГРАФИКИ
+   ===================================================================== */
 function buildSparklineSVG(values, { min = null, max = null } = {}) {
   const clean = values.filter((v) => Number.isFinite(v));
   if (clean.length < 2) return null;
@@ -387,111 +397,146 @@ function buildSparklineSVG(values, { min = null, max = null } = {}) {
   const lo = min != null ? min : Math.min(...clean);
   const hi = max != null ? max : Math.max(...clean);
   const span = hi - lo || 1;
- 
-  const w = 100;
-  const h = 30;
-  const pad = 3;
+  const w = 100, h = 30, pad = 3;
  
   const points = values.map((v, i) => {
     const x = (i / (values.length - 1)) * w;
     const norm = Number.isFinite(v) ? (v - lo) / span : 0.5;
-    const y = h - pad - norm * (h - pad * 2);
-    return [x, y];
+    return [x, h - pad - norm * (h - pad * 2)];
   });
  
-  const linePath = points.map((p, i) => `${i === 0 ? "M" : "L"}${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(" ");
-  const areaPath = `${linePath} L${w},${h} L0,${h} Z`;
-  const gradientId = `miniChartFade`;
+  const line = points.map((p, i) => `${i === 0 ? "M" : "L"}${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(" ");
+  const area = `${line} L${w},${h} L0,${h} Z`;
  
   return `
     <svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">
       <defs>
-        <linearGradient id="${gradientId}" x1="0" y1="0" x2="0" y2="1">
+        <linearGradient id="miniChartFade" x1="0" y1="0" x2="0" y2="1">
           <stop offset="0%" stop-color="var(--accent-2)" stop-opacity="0.55" />
           <stop offset="100%" stop-color="var(--accent-2)" stop-opacity="0" />
         </linearGradient>
       </defs>
-      <path class="mini-chart-area" d="${areaPath}" />
-      <path class="mini-chart-line" d="${linePath}" />
-    </svg>
-  `;
+      <path class="mini-chart-area" d="${area}" />
+      <path class="mini-chart-line" d="${line}" />
+    </svg>`;
 }
  
 function renderMiniChart(wrapEl, values, opts) {
   if (!wrapEl) return;
- 
   const svg = buildSparklineSVG(values, opts);
- 
-  if (!svg) {
-    wrapEl.innerHTML = `<span class="chart-note">История ещё не накоплена</span>`;
-    return;
-  }
- 
-  wrapEl.innerHTML = svg;
+  wrapEl.innerHTML = svg || `<span class="chart-note">История ещё не накоплена</span>`;
 }
  
 function renderPressureTrend() {
   if (!ui.trendChart) return;
- 
-  const rows = state.history;
-  const values = rows.map((r) => r.press).filter((v) => Number.isFinite(v));
+  const values = state.history.map((r) => r.press).filter(Number.isFinite);
  
   if (values.length < 2) {
     ui.trendChart.innerHTML = `<span class="chart-note">История ещё не накоплена</span>`;
     return;
   }
  
-  const lo = Math.min(...values);
-  const hi = Math.max(...values);
-  const span = hi - lo || 1;
+  // 8 столбиков: усредняем историю в 8 корзин
+  const buckets = 8;
+  const size = Math.ceil(values.length / buckets);
+  const bars = [];
+  for (let i = 0; i < values.length; i += size) {
+    const part = values.slice(i, i + size);
+    bars.push(part.reduce((a, b) => a + b, 0) / part.length);
+  }
  
-  ui.trendChart.innerHTML = values.map((v) => {
-    const pct = 12 + ((v - lo) / span) * 78; // keep bars visible even when flat
-    return `<span style="--h: ${pct.toFixed(1)}%"></span>`;
-  }).join("");
+  const lo = Math.min(...bars), hi = Math.max(...bars);
+  const span = hi - lo || 1;
+  ui.trendChart.innerHTML = bars
+    .map((v) => `<span style="--h: ${(12 + ((v - lo) / span) * 78).toFixed(1)}%"></span>`)
+    .join("");
 }
  
 function renderCharts() {
   const rows = state.history;
- 
   renderMiniChart(ui.tempChartWrap, rows.map((r) => r.temp));
   renderMiniChart(ui.humidityChartWrap, rows.map((r) => r.hum), { min: 0, max: 100 });
-  renderMiniChart(ui.airChartWrap, rows.map((r) => r.gas));
+  renderMiniChart(ui.airChartWrap, rows.map((r) => r.pm25), { min: 0 });
   renderMiniChart(
     ui.rainChartWrap,
-    rows.map((r) => (Number.isFinite(r.hum) && Number.isFinite(r.press) ? rainChanceFrom(r.hum, r.press) : null)),
+    rows.map((r) => (Number.isFinite(r.hum) && Number.isFinite(r.press) ? rainChanceFrom(r.hum, r.press, null) : null)),
     { min: 0, max: 100 }
   );
- 
   renderPressureTrend();
 }
  
-// ---------------------------------------------------------------------
-// Rendering
-// ---------------------------------------------------------------------
- 
+/* =====================================================================
+   ОТРИСОВКА
+   ===================================================================== */
 function renderForecast() {
-  const items = state.forecast?.length ? state.forecast : placeholderForecast();
+  const items = state.forecast?.length
+    ? state.forecast
+    : ["21:00", "00:00", "03:00", "06:00", "09:00"].map((time) => ({ time, temp: null, rain: null }));
  
   ui.forecastGrid.innerHTML = items.map((item) => {
-    const hasData = item.temp != null && item.rain != null;
-    const icon = hasData && item.rain >= 20 ? "images/icon_rain.png" : "images/icon_time.png";
-    const tempLabel = hasData ? `${item.temp}°` : "—";
-    const rainLabel = hasData ? `${item.rain}%` : "нет данных";
+    const ok = item.temp != null && item.rain != null;
+    const icon = ok && item.rain >= 20 ? "images/icon_rain.png" : "images/icon_time.png";
     return `
       <article class="forecast-card">
         <img src="${icon}" alt="" class="forecast-icon" aria-hidden="true" />
         <div class="forecast-time">${item.time}</div>
-        <div class="forecast-temp">${tempLabel}</div>
-        <div class="forecast-label">${rainLabel}</div>
-      </article>
-    `;
+        <div class="forecast-temp">${ok ? item.temp + "°" : "—"}</div>
+        <div class="forecast-label">${ok ? item.rain + "%" : "нет данных"}</div>
+      </article>`;
   }).join("");
 }
  
-function renderLogs() {
-  const items = state.logs?.length ? state.logs : fallbackLogs();
+/* Лента событий собирается из реальных данных станции. */
+function buildLogs() {
+  const out = [];
+  const t = (n) => new Intl.DateTimeFormat("it-IT", {
+    timeZone: CONFIG.TIMEZONE, hour: "2-digit", minute: "2-digit", hour12: false,
+  }).format(new Date(Date.now() - n * 1000));
  
+  if (state.online) {
+    out.push({ icon: "icon_status.png", title: "Станция на связи",
+               meta: `${t(0)} — данные ${formatRelativeUpdate(state.lastUpdatedAt)}` });
+  } else {
+    out.push({ icon: "icon_status.png", title: "Станция не отвечает",
+               meta: `последние данные ${formatRelativeUpdate(state.lastUpdatedAt)}` });
+  }
+ 
+  if (has(state.lightningAgeS) && state.lightningAgeS < 3600) {
+    out.push({ icon: "icon_status.png", title: "Зафиксирована молния",
+               meta: `${t(state.lightningAgeS)} — ${has(state.lightningDistance) ? state.lightningDistance + " км" : "расстояние неизвестно"}` });
+  }
+ 
+  if (has(state.pressureTrend3h)) {
+    const d = state.pressureTrend3h;
+    out.push({ icon: "icon_pressure.png",
+               title: d <= -1 ? "Давление падает" : d >= 1 ? "Давление растёт" : "Давление стабильно",
+               meta: `за 3 часа ${d > 0 ? "+" : ""}${d} гПа — ${state.pressure.toFixed(1)} гПа` });
+  }
+ 
+  const temps = state.history.map((r) => r.temp).filter(Number.isFinite);
+  if (temps.length > 2) {
+    out.push({ icon: "icon_temp.png", title: "Сутки по температуре",
+               meta: `от ${Math.min(...temps).toFixed(1)}° до ${Math.max(...temps).toFixed(1)}°` });
+  }
+ 
+  out.push({ icon: "icon_air.png", title: `Воздух: ${state.airLabel.toLowerCase()}`,
+             meta: has(state.pm25) ? `PM2.5 ${state.pm25} мкг/м³, PM10 ${state.pm10 ?? "—"}` : "датчик пыли молчит" });
+ 
+  if (has(state.rssi) && state.rssi < -80) {
+    out.push({ icon: "icon_status.png", title: "Слабый сигнал Wi-Fi",
+               meta: `${state.rssi} дБм — возможны пропуски в данных` });
+  }
+ 
+  if (has(state.uptimeS)) {
+    out.push({ icon: "icon_status.png", title: "Время работы",
+               meta: `${durWords(state.uptimeS)} без перезагрузки` });
+  }
+ 
+  return out;
+}
+ 
+function renderLogs() {
+  const items = state.logs?.length ? state.logs : buildLogs();
   ui.logsList.innerHTML = items.map((log) => `
     <article class="log-item">
       <img src="images/${log.icon}" alt="" class="log-icon" aria-hidden="true" />
@@ -499,36 +544,14 @@ function renderLogs() {
         <div class="log-title">${log.title}</div>
         <div class="log-meta">${log.meta}</div>
       </div>
-    </article>
-  `).join("");
-}
- 
-function formatRelativeUpdate(ms) {
-  if (!ms) return "нет данных";
- 
-  const diffSec = Math.max(0, Math.round((Date.now() - ms) / 1000));
- 
-  if (diffSec < 20) return "только что";
-  if (diffSec < 60) return `${diffSec} сек назад`;
- 
-  const diffMin = Math.round(diffSec / 60);
-  if (diffMin < 60) return `${diffMin} мин назад`;
- 
-  const diffHr = Math.round(diffMin / 60);
-  return `${diffHr} ч назад`;
+    </article>`).join("");
 }
  
 function renderLastUpdate() {
   if (!ui.lastUpdateText) return;
- 
   ui.lastUpdateText.textContent = formatRelativeUpdate(state.lastUpdatedAt);
- 
-  const staleMs = INTERVALS.station * 4; // no fresh data for a while -> flag as stale
-  const isStale = !state.lastUpdatedAt || (Date.now() - state.lastUpdatedAt) > staleMs;
- 
-  if (ui.lastUpdateChip) {
-    ui.lastUpdateChip.classList.toggle("is-stale", isStale);
-  }
+  const stale = !state.lastUpdatedAt || (Date.now() - state.lastUpdatedAt) > INTERVALS.station * 4;
+  if (ui.lastUpdateChip) ui.lastUpdateChip.classList.toggle("is-stale", stale);
 }
  
 function renderState() {
@@ -538,346 +561,206 @@ function renderState() {
   ui.humidityText.textContent = `${Math.round(state.humidity)}%`;
   ui.pressureText.textContent = `${state.pressure.toFixed(1)} hPa`;
   ui.airText.textContent = state.airLabel;
-  ui.rainText.textContent = state.rainText || `${Math.round(state.rainChance)}%`;
-  ui.windText.textContent = state.wind == null ? "Нет данных" : `${state.wind.toFixed(1)} м/с`;
+  ui.rainText.textContent = `${Math.round(state.rainChance)}%`;
  
+  // Ветра на станции нет. Показываем прогнозный и честно это подписываем.
+  if (has(state.windForecast)) {
+    ui.windText.textContent = `${state.windForecast.toFixed(1)} м/с`;
+    ui.windMood.textContent = "По прогнозу, датчика нет";
+  } else {
+    ui.windText.textContent = "Нет датчика";
+    ui.windMood.textContent = "Не установлен";
+  }
+ 
+  const dp = dewPoint(state.temp, state.humidity);
   ui.tempMood.textContent = state.tempMood;
-  ui.humidityMood.textContent = state.humidityMood;
-  ui.pressureMood.textContent = state.pressureMood;
+  ui.humidityMood.textContent = dp !== null ? `${state.humidityMood} · точка росы ${dp}°` : state.humidityMood;
+  ui.pressureMood.textContent = has(state.pressureTrend3h)
+    ? `${state.pressureMood} · за 3ч ${state.pressureTrend3h > 0 ? "+" : ""}${state.pressureTrend3h}`
+    : state.pressureMood;
   ui.airMood.textContent = state.airMood;
   ui.rainMood.textContent = state.rainMood;
-  ui.windMood.textContent = state.windMood;
  
   ui.statusBadge.textContent = state.statusLabel;
-  ui.trendText.textContent = state.pressureMood === "Низкое" ? "Падает" : "Стабильно";
+  ui.trendText.textContent = trendWord(state.pressureTrend3h);
  
   ui.vaultboySprite.src = spriteMap[state.sprite] || spriteMap.perfect;
-  ui.vaultboySprite.alt = `Vault Boy: ${state.sprite || "perfect"}`;
+  ui.vaultboySprite.alt = `Vault Boy: ${state.sprite}`;
  
   renderLastUpdate();
 }
  
 function setTab(tabName) {
-  document.querySelectorAll(".tab-btn").forEach((btn) => {
-    btn.classList.toggle("active", btn.dataset.tab === tabName);
-  });
- 
-  document.querySelectorAll(".pane").forEach((pane) => {
-    pane.classList.toggle("active", pane.dataset.pane === tabName);
-  });
- 
-  if (tabName === "logs") refreshHistory();
+  document.querySelectorAll(".tab-btn").forEach((b) => b.classList.toggle("active", b.dataset.tab === tabName));
+  document.querySelectorAll(".pane").forEach((p) => p.classList.toggle("active", p.dataset.pane === tabName));
+  if (tabName === "logs") { state.logs = buildLogs(); renderLogs(); }
 }
  
-// ---------------------------------------------------------------------
-// Local cache (offline resilience)
-// ---------------------------------------------------------------------
- 
+/* =====================================================================
+   КЭШ
+   ===================================================================== */
 function saveCache() {
   try {
-    const snapshot = {
-      state: {
-        location: state.location,
-        timestamp: state.timestamp,
-        temp: state.temp,
-        humidity: state.humidity,
-        pressure: state.pressure,
-        gas: state.gas,
-        wind: state.wind,
-        rainChance: state.rainChance,
-        rainText: state.rainText,
-        sprite: state.sprite,
-        skyLabel: state.skyLabel,
-        statusLabel: state.statusLabel,
-        tempMood: state.tempMood,
-        humidityMood: state.humidityMood,
-        pressureMood: state.pressureMood,
-        airLabel: state.airLabel,
-        airMood: state.airMood,
-        rainMood: state.rainMood,
-        windMood: state.windMood,
-        forecast: state.forecast,
-        history: state.history,
-        lastUpdatedAt: state.lastUpdatedAt,
-        weatherCode: state.weatherCode,
-        sunrise: state.sunrise ? state.sunrise.toISOString() : null,
-        sunset: state.sunset ? state.sunset.toISOString() : null,
-        sunDate: state.sunDate,
-      },
-      savedAt: Date.now(),
-    };
-    localStorage.setItem(CACHE_KEY, JSON.stringify(snapshot));
-  } catch (err) {
-    // Storage can fail (quota, privacy mode) - never let that break the UI.
-    console.warn("Cache save skipped:", err);
-  }
+    localStorage.setItem(CACHE_KEY, JSON.stringify({ state: { ...state, sunrise: null, sunset: null }, savedAt: Date.now() }));
+  } catch (e) {}
 }
  
 function loadCache() {
   try {
     const raw = localStorage.getItem(CACHE_KEY);
-    if (!raw) return null;
-    return JSON.parse(raw);
-  } catch (err) {
-    console.warn("Cache read skipped:", err);
-    return null;
-  }
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) { return null; }
 }
  
-function applyCachedSnapshot(snapshot) {
-  if (!snapshot || !snapshot.state) return;
-  const s = snapshot.state;
- 
-  const history = Array.isArray(s.history) ? s.history : [];
-  const cachedLogs = history
-    .slice(-10)
-    .reverse()
-    .map((row) => ({
-      icon: "icon_status.png",
-      title: Number.isFinite(row.temp) ? `${row.temp.toFixed(1)}°C` : "—",
-      meta: `${row.timestamp || "—"} | H:${row.hum ?? "—"}% P:${row.press ?? "—"} G:${row.gas ?? "—"}`,
-    }));
- 
-  Object.assign(state, s, {
-    online: false, // we don't actually know yet - a live fetch will confirm
-    sunrise: s.sunrise ? new Date(s.sunrise) : null,
-    sunset: s.sunset ? new Date(s.sunset) : null,
-    history,
-    logs: cachedLogs,
-  });
- 
-  renderState();
-  renderForecast();
-  renderLogs();
-  renderCharts();
+function applyCachedSnapshot(snap) {
+  if (!snap || !snap.state) return;
+  Object.assign(state, snap.state, { online: false, sunrise: null, sunset: null });
+  if (!Array.isArray(state.history)) state.history = [];
+  renderState(); renderForecast(); renderLogs(); renderCharts();
 }
  
-function applyStatus(payload) {
-  if (!payload) return;
- 
-  const temp = safeNumber(payload.temp, state.temp);
-  const hum = safeNumber(payload.hum ?? payload.humidity, state.humidity);
-  const press = safeNumber(payload.press ?? payload.pressure, state.pressure);
-  const gas = safeNumber(payload.gas, state.gas);
-  const windValue = payload.wind == null ? state.wind : safeNumber(payload.wind, state.wind);
-  const rainChance = safeNumber(payload.rainChance, rainChanceFrom(hum, press));
-  const codeBucket = weatherCodeBucket(state.weatherCode);
-  const sprite = payload.sprite || spriteFromValues(temp, hum, press, gas, rainChance, codeBucket);
- 
-  state.online = payload.online !== false;
-  state.location = payload.location || CONFIG.LOCATION_FALLBACK;
-  state.timestamp = payload.timestamp || state.timestamp;
-  state.temp = temp;
-  state.humidity = hum;
-  state.pressure = press;
-  state.gas = gas;
-  state.pm1 = payload.pm1 ?? state.pm1;
-
-state.pm25 = payload.pm25 ?? state.pm25;
-
-state.pm10 = payload.pm10 ?? state.pm10;
-
-state.uv = payload.uv ?? state.uv;
-
-state.lux = payload.lux ?? state.lux;
-
-state.lightningDistance =
-    payload.lightningDistance ?? state.lightningDistance;
-
-state.lightningEnergy =
-    payload.lightningEnergy ?? state.lightningEnergy;
-  state.wind = windValue;
-  state.rainChance = rainChance;
-  state.rainText = payload.rainText || rainLabelFrom(rainChance);
-  state.sprite = sprite;
-  state.skyLabel = skyLabelFromSprite(sprite);
-  state.statusLabel = payload.statusLabel || statusLabelFromSprite(sprite);
-  state.tempMood = payload.tempMood || tempMoodFrom(temp);
-  state.humidityMood = payload.humidityMood || humidityMoodFrom(hum);
-  state.pressureMood = payload.pressureMood || pressureMoodFrom(press);
-  state.airLabel = payload.airLabel || airLabelFromGas(gas);
-  state.airMood = payload.airMood || airMoodFromGas(gas);
-  state.rainMood = payload.rainMood || (rainChance >= 45 ? "Вероятен" : rainChance >= 20 ? "Возможен" : "Маловероятен");
-  state.windMood = payload.windMood || windMoodFromSpeed(state.wind);
- 
-  if (Array.isArray(payload.forecast) && payload.forecast.length) {
-    state.forecast = payload.forecast;
-  } else if (!state.forecast || !state.forecast.length) {
-    state.forecast = placeholderForecast();
-  }
- 
-  if (payload.online !== false) {
-    state.lastUpdatedAt = Date.now();
-  }
+/* =====================================================================
+   ДАННЫЕ СТАНЦИИ
+   ===================================================================== */
+async function apiGet(path) {
+  const r = await fetch(CONFIG.API_BASE + path, { cache: "no-store" });
+  if (!r.ok) throw new Error("HTTP " + r.status);
+  return r.json();
 }
  
-function applyCsvLine(line) {
-  if (!line || !line.trim()) return false;
+function recompute() {
+  const bucket = weatherCodeBucket(state.weatherCode);
+  const lightningFresh = has(state.lightningAgeS) && state.lightningAgeS < 1800;
  
-  const parts = line.trim().split(",");
-  if (parts.length < 5) return false;
+  state.tempMood = tempMoodFrom(state.temp);
+  state.humidityMood = humidityMoodFrom(state.humidity);
+  state.pressureMood = pressureMoodFrom(state.pressure);
+  state.airLabel = airLabelFromPm(state.pm25);
+  state.airMood = airMoodFromPm(state.pm25);
  
-  const temp = safeNumber(parts[1], state.temp);
-  const hum = safeNumber(parts[2], state.humidity);
-  const press = safeNumber(parts[3], state.pressure);
-  const gas = safeNumber(parts[4], state.gas);
-  const rainChance = rainChanceFrom(hum, press);
-  const sprite = spriteFromValues(temp, hum, press, gas, rainChance, weatherCodeBucket(state.weatherCode));
+  state.rainText = rainLabelFrom(state.rainChance);
+  state.rainMood = state.rainChance >= 45 ? "Вероятен" : state.rainChance >= 20 ? "Возможен" : "Маловероятен";
  
-  applyStatus({
-    online: true,
-    location: state.location,
-    timestamp: parts[0],
-    temp,
-    hum,
-    press,
-    gas,
-    wind: null,
-    rainChance,
-    rainText: rainLabelFrom(rainChance),
-    sprite,
-    skyLabel: skyLabelFromSprite(sprite),
-    statusLabel: statusLabelFromSprite(sprite),
-    tempMood: tempMoodFrom(temp),
-    humidityMood: humidityMoodFrom(hum),
-    pressureMood: pressureMoodFrom(press),
-    airLabel: airLabelFromGas(gas),
-    airMood: airMoodFromGas(gas),
-    rainMood: rainChance >= 45 ? "Вероятен" : rainChance >= 20 ? "Возможен" : "Маловероятен",
-    windMood: windMoodFromSpeed(state.wind),
-  });
- 
-  return true;
+  state.sprite = spriteFromValues(state.temp, state.humidity, state.pressure, state.pm25,
+                                  state.rainChance, bucket, lightningFresh);
+  state.skyLabel = skyLabelFromSprite(state.sprite);
+  state.statusLabel = statusLabelFromSprite(state.sprite);
 }
- 
-// ---------------------------------------------------------------------
-// Data sources
-// ---------------------------------------------------------------------
  
 async function refreshStatus() {
-
   try {
-
-    const res = await fetch(`${CONFIG.API_BASE}/status`, {
-      cache: "no-store"
-    });
-
-    if (!res.ok) {
-      throw new Error(`Backend HTTP ${res.status}`);
+    const d = await apiGet("/current");
+    const w = d.weather, a = d.air, l = d.lightning, dev = d.device;
+ 
+    state.online = d.online === true;
+    state.location = CONFIG.LOCATION;
+    state.timestamp = d.time;
+    state.temp = safeNumber(w.temperature_c, state.temp);
+    state.humidity = safeNumber(w.humidity_pct, state.humidity);
+    state.pressure = safeNumber(w.pressure_sea_hpa ?? w.pressure_hpa, state.pressure);
+    state.pressureRaw = safeNumber(w.pressure_hpa, state.pressureRaw);
+    state.lux = has(w.lux) ? w.lux : null;
+    state.uv = has(w.uv_index) ? w.uv_index : null;
+ 
+    state.pm1 = has(a.pm1_ugm3) ? a.pm1_ugm3 : null;
+    state.pm25 = has(a.pm25_ugm3) ? a.pm25_ugm3 : null;
+    state.pm10 = has(a.pm10_ugm3) ? a.pm10_ugm3 : null;
+    state.gasKOhm = has(a.gas_ohm) ? Math.round(a.gas_ohm / 1000) : 0;
+ 
+    state.lightningDistance = has(l.last_distance_km) ? l.last_distance_km : null;
+    state.lightningAgeS = has(l.last_age_s) ? l.last_age_s : null;
+    state.lightningCount = safeNumber(l.strikes, 0);
+ 
+    state.rssi = has(dev.rssi_dbm) ? dev.rssi_dbm : null;
+    state.freeHeap = has(dev.free_heap) ? dev.free_heap : null;
+    state.uptimeS = has(dev.uptime_s) ? dev.uptime_s : null;
+ 
+    // Если прогноза дождя ещё нет — считаем сами по давлению и влажности
+    if (!has(state.rainChanceFromForecast)) {
+      state.rainChance = rainChanceFrom(state.humidity, state.pressure, state.pressureTrend3h);
     }
-
-    const row = await res.json();
-
-    applyStatus({
-
-      online: true,
-
-      location: CONFIG.LOCATION_FALLBACK,
-
-      timestamp: row.updated || row.timestamp,
-
-      temp: row.temperature,
-
-      hum: row.humidity,
-
-      press: row.pressure,
-
-      gas: row.gas,
-
-      wind: row.wind,
-
-      rainChance: row.rainChance,
-
-      uv: row.uv,
-
-      lux: row.lux,
-
-      pm1: row.pm1,
-
-      pm25: row.pm25,
-
-      pm10: row.pm10,
-
-      lightningDistance: row.lightningDistance,
-
-      lightningEnergy: row.lightningEnergy
-
-    });
-
+ 
+    if (state.online) state.lastUpdatedAt = Date.now();
+ 
+    recompute();
     renderState();
-
-    renderForecast();
-
+    state.logs = buildLogs();
+    renderLogs();
     saveCache();
-
   } catch (err) {
-
-    console.warn("Backend unavailable:", err);
-
+    console.warn("Сервер недоступен:", err);
     state.online = false;
-
     renderLastUpdate();
-
   }
-
 }
  
 async function refreshHistory() {
-
-    try {
-
-        const res = await fetch(`${CONFIG.API_BASE}/history`, {
-            cache: "no-store"
-        });
-
-        if (!res.ok) {
-            throw new Error(`HTTP ${res.status}`);
-        }
-
-        const history = await res.json();
-
-        state.history = history;
-
-        renderChart();
-
-    } catch (err) {
-
-        console.error("History error:", err);
-
+  try {
+    const d = await apiGet("/history?fields=temperature_c,humidity_pct,pressure_hpa,pm25_ugm3&range=24h");
+    const s = d.series || {};
+ 
+    // Собираем ряды в один массив строк по времени
+    const map = new Map();
+    const put = (field, key) => {
+      (s[field] || []).forEach(([ts, v]) => {
+        if (!map.has(ts)) map.set(ts, { ts });
+        map.get(ts)[key] = v;
+      });
+    };
+    put("temperature_c", "temp");
+    put("humidity_pct", "hum");
+    put("pressure_hpa", "press");
+    put("pm25_ugm3", "pm25");
+ 
+    state.history = [...map.values()].sort((a, b) => a.ts - b.ts);
+ 
+    // Тренд давления за 3 часа — основа прогноза
+    const target = Date.now() - 3 * 3600 * 1000;
+    let p3 = null, best = Infinity;
+    for (const r of state.history) {
+      if (!Number.isFinite(r.press)) continue;
+      const diff = Math.abs(r.ts - target);
+      if (diff < best) { best = diff; p3 = r.press; }
     }
-
+    state.pressureTrend3h = p3 !== null && Number.isFinite(state.pressureRaw)
+      ? Math.round((state.pressureRaw - p3) * 10) / 10
+      : null;
+ 
+    renderCharts();
+    renderState();
+    saveCache();
+  } catch (err) {
+    console.warn("История недоступна:", err);
+  }
 }
  
 async function refreshOpenMeteo() {
- 
   try {
- 
-    const url =
-      `https://api.open-meteo.com/v1/forecast` +
+    const url = `https://api.open-meteo.com/v1/forecast` +
       `?latitude=${CONFIG.LAT}&longitude=${CONFIG.LON}` +
-      `&current=temperature_2m,weathercode,windspeed_10m` +
+      `&current=temperature_2m,weathercode,windspeed_10m,precipitation_probability` +
       `&hourly=temperature_2m,precipitation_probability` +
       `&daily=sunrise,sunset` +
       `&timezone=${encodeURIComponent(CONFIG.TIMEZONE)}` +
       `&forecast_days=2`;
  
     const res = await fetch(url);
-    if (!res.ok) throw new Error(`Open-Meteo HTTP ${res.status}`);
- 
+    if (!res.ok) throw new Error("Open-Meteo HTTP " + res.status);
     const data = await res.json();
  
     if (data.current) {
       state.weatherCode = safeNumber(data.current.weathercode, state.weatherCode);
-      const windSpeed = safeNumber(data.current.windspeed_10m, null);
-      // Open-Meteo returns km/h; convert to m/s to match the station's unit.
-      state.wind = windSpeed == null ? state.wind : windSpeed / 3.6;
-      state.windMood = windMoodFromSpeed(state.wind);
+      const ws = data.current.windspeed_10m;
+      state.windForecast = Number.isFinite(ws) ? ws / 3.6 : state.windForecast;  // км/ч → м/с
+      const pp = data.current.precipitation_probability;
+      if (Number.isFinite(pp)) {
+        state.rainChance = pp;
+        state.rainChanceFromForecast = true;
+      }
     }
  
     if (data.daily?.sunrise?.length && data.daily?.sunset?.length) {
       const today = new Date().toISOString().slice(0, 10);
-      // Only actually replace the cached sunrise/sunset once per calendar
-      // day, per spec, even though this call itself runs every 10 min.
       if (state.sunDate !== today) {
         state.sunrise = new Date(data.daily.sunrise[0]);
         state.sunset = new Date(data.daily.sunset[0]);
@@ -888,77 +771,45 @@ async function refreshOpenMeteo() {
     if (data.hourly?.time?.length) {
       const nowMs = Date.now();
       const times = data.hourly.time.map((t) => new Date(t).getTime());
-      let startIdx = times.findIndex((t) => t >= nowMs);
-      if (startIdx === -1) startIdx = 0;
+      let start = times.findIndex((t) => t >= nowMs);
+      if (start === -1) start = 0;
  
-      const steps = [3, 6, 9, 12, 15];
-      const forecast = steps
-        .map((offset) => startIdx + offset)
-        .filter((idx) => idx < times.length)
-        .map((idx) => {
-          const d = new Date(times[idx]);
-          const label = new Intl.DateTimeFormat("ru-RU", {
-            timeZone: CONFIG.TIMEZONE,
-            hour: "2-digit",
-            minute: "2-digit",
-            hour12: false,
-          }).format(d);
-          const temp = data.hourly.temperature_2m?.[idx];
-          const rain = data.hourly.precipitation_probability?.[idx];
-          return {
-            time: label,
-            temp: Number.isFinite(temp) ? Math.round(temp) : null,
-            rain: Number.isFinite(rain) ? Math.round(rain) : null,
-          };
-        });
+      state.forecast = [3, 6, 9, 12, 15]
+        .map((o) => start + o)
+        .filter((i) => i < times.length)
+        .map((i) => ({
+          time: new Intl.DateTimeFormat("ru-RU", {
+            timeZone: CONFIG.TIMEZONE, hour: "2-digit", minute: "2-digit", hour12: false,
+          }).format(new Date(times[i])),
+          temp: Number.isFinite(data.hourly.temperature_2m?.[i]) ? Math.round(data.hourly.temperature_2m[i]) : null,
+          rain: Number.isFinite(data.hourly.precipitation_probability?.[i]) ? Math.round(data.hourly.precipitation_probability[i]) : null,
+        }));
  
-      if (forecast.length) {
-        state.forecast = forecast;
-        renderForecast();
-      }
+      renderForecast();
     }
  
     state.lastOpenMeteoAt = Date.now();
- 
-    // Weather-code can change which sprite/sky label fits best - re-apply
-    // with the latest station readings so the UI stays reactive.
-    applyStatus({
-      online: state.online,
-      location: state.location,
-      timestamp: state.timestamp,
-      temp: state.temp,
-      hum: state.humidity,
-      press: state.pressure,
-      gas: state.gas,
-      wind: state.wind,
-    });
- 
+    recompute();
     renderState();
     saveCache();
- 
   } catch (err) {
- 
-    console.warn("Open-Meteo unavailable, keeping last known data:", err);
- 
+    console.warn("Open-Meteo недоступен, оставляю прежние данные:", err);
   }
- 
 }
  
-window.setWeatherBoy = function setWeatherBoy(nextData) {
-  applyStatus(nextData);
-  renderState();
-  renderForecast();
-  saveCache();
-};
+/* =====================================================================
+   ЗАПУСК
+   ===================================================================== */
+Snd.setup();
  
 document.querySelectorAll(".tab-btn").forEach((btn) => {
-  btn.addEventListener("click", () => setTab(btn.dataset.tab));
+  btn.addEventListener("click", () => {
+    setTab(btn.dataset.tab);
+    Snd.play("tab");
+  });
 });
  
-// Paint immediately from cache (if any) so the UI never shows an empty
-// screen while the network requests are still in flight.
 applyCachedSnapshot(loadCache());
- 
 renderState();
 renderForecast();
 renderLogs();
@@ -975,85 +826,32 @@ setInterval(refreshHistory, INTERVALS.history);
 setInterval(refreshOpenMeteo, INTERVALS.openMeteo);
 setInterval(renderLastUpdate, INTERVALS.lastUpdateTick);
  
-window.addEventListener("online", () => {
-  refreshStatus();
-  refreshHistory();
-  refreshOpenMeteo();
-});
+window.addEventListener("online", () => { refreshStatus(); refreshHistory(); refreshOpenMeteo(); });
+document.addEventListener("visibilitychange", () => { if (!document.hidden) refreshStatus(); });
  
-const bootSound = new Audio("sounds/pipboy_boot.mp3");
-const tabSound = new Audio("sounds/pipboy_tab.mp3");
- 
-let audioUnlocked = false;
- 
-document.addEventListener("click", () => {
- 
-  if (audioUnlocked) return;
- 
-  audioUnlocked = true;
- 
-  bootSound.volume = 0.5;
-  tabSound.volume = 0.4;
- 
-}, { once: true });
- 
+/* Экран загрузки */
 window.addEventListener("load", () => {
- 
-  const boot = document.getElementById("bootScreen");
-  const bar = document.getElementById("bootProgress");
-  const percent = document.getElementById("bootPercent");
- 
-  if (!boot || !bar || !percent) {
-    console.warn("Boot screen not found");
-    return;
-  }
+  const boot = $("bootScreen"), bar = $("bootProgress"), percent = $("bootPercent");
+  if (!boot || !bar || !percent) return;
  
   let value = 0;
- 
   const timer = setInterval(() => {
- 
     value += 2;
- 
     bar.style.width = value + "%";
     percent.textContent = value + "%";
- 
     if (value >= 100) {
- 
       clearInterval(timer);
- 
       setTimeout(() => {
- 
-        if (audioUnlocked) {
-          bootSound.currentTime = 0;
-          bootSound.play().catch(() => {});
-        }
- 
+        Snd.play("boot");
+        boot.style.transition = "opacity 500ms ease";
         boot.style.opacity = "0";
- 
-        setTimeout(() => {
- 
-          boot.remove();
- 
-        }, 500);
- 
+        setTimeout(() => boot.remove(), 520);
       }, 300);
- 
     }
- 
   }, 25);
- 
 });
  
-document.querySelectorAll(".tab-btn").forEach(btn => {
- 
-  btn.addEventListener("click", () => {
- 
-    if (!audioUnlocked) return;
- 
-    tabSound.currentTime = 0;
- 
-    tabSound.play().catch(() => {});
- 
-  });
- 
-});
+/* Telegram Mini App: развернуть на весь экран, если открыто из бота */
+if (window.Telegram && window.Telegram.WebApp) {
+  try { window.Telegram.WebApp.ready(); window.Telegram.WebApp.expand(); } catch (e) {}
+}
